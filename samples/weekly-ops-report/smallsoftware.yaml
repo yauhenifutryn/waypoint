@@ -1,0 +1,13 @@
+apiVersion: smallsoftware/v0.1
+kind: static
+metadata:
+  name: weekly-ops-report
+  owner: ops-owner@example.invalid
+  purpose: >
+    Synthetic weekly one-page delivery and support summary regenerated from
+    fixture metrics for a demo operations review.
+spec:
+  static:
+    publishPath: dist
+blastRadius:
+  audience: team

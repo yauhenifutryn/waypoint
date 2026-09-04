@@ -1,0 +1,27 @@
+apiVersion: smallsoftware/v0.1
+kind: service
+metadata:
+  name: stock-lookup-api
+  owner: inventory-owner@example.invalid
+  purpose: >
+    Synthetic read-only REST lookup over a fixture stock price table with an
+    optional synthetic EUR/USD conversion endpoint for demo smoke checks.
+spec:
+  service:
+    entrypoint: server.mjs
+    startCommand: node server.mjs
+    port: 8080
+    healthCheckPath: /healthz
+    restartPolicy: on-failure
+    gracePeriodSeconds: 10
+egress:
+  - host: rates.example.invalid
+    protocol: https
+env:
+  - name: PORT
+    value: "8080"
+blastRadius:
+  audience: team
+tests:
+  required: true
+  command: node test.mjs

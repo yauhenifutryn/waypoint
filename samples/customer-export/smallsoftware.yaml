@@ -1,0 +1,22 @@
+apiVersion: smallsoftware/v0.1
+kind: job
+metadata:
+  name: customer-export
+  owner: sales-owner@example.invalid
+  purpose: >
+    Synthetic weekly read-only report fixture that intentionally violates the
+    demo governance policy. Its daily schedule and all identities are synthetic.
+spec:
+  job:
+    entrypoint: export.mjs
+    startCommand: node export.mjs
+    schedule:
+      cron: "0 9 * * *"
+      timezone: UTC
+blastRadius:
+  audience: department
+  writesSharedState: false
+riskAttestation:
+  pii: false
+  externallyVisible: false
+  downtimeTolerance: synthetic-demo

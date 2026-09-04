@@ -1,0 +1,3 @@
+# alteryx-parity-checker
+
+A parity harness for migrating a legacy Alteryx ledger-fee workflow (`legacy/workflow.yxmd`) to a dependency-free Node pipeline in `migrated/index.mjs`, owned by finance ops until cutover is signed off. The dual-run method is simple: the same `fixtures/input.csv` is fed through both engines, Alteryx Designer produces a baseline CSV once during migration review, and the Node pipeline must reproduce it row-for-row on every run. The checked-in `fixtures/expected.csv` pins that baseline, so any drift in filter thresholds, fee rounding, or grouping breaks `migrated/parity.test.mjs` immediately.

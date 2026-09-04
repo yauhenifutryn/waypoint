@@ -1,0 +1,33 @@
+apiVersion: smallsoftware/v0.1
+kind: job
+metadata:
+  name: alteryx-parity-checker
+  owner: migration-owner@example.invalid
+  purpose: >
+    Synthetic daily parity harness that checks a fixture migration against a
+    bundled legacy workflow. Schedule and data paths are synthetic.
+  provenance:
+    builtWith: demo-tooling
+    migratedFrom: alteryx/yxmd
+spec:
+  job:
+    entrypoint: migrated/index.mjs
+    startCommand: node migrated/index.mjs
+    schedule:
+      cron: "0 9 * * *"
+      timezone: UTC
+resources:
+  - name: ledger-input
+    type: file-share
+    classification: finance
+    access: read
+    path: //example.invalid/demo/ledger
+env:
+  - name: LEDGER_DIR
+    valueFromResource: ledger-input
+blastRadius:
+  audience: team
+  writesSharedState: false
+tests:
+  required: true
+  command: node migrated/parity.test.mjs

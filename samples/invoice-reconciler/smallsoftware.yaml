@@ -1,0 +1,48 @@
+apiVersion: smallsoftware/v0.1
+kind: job
+metadata:
+  name: invoice-reconciler
+  owner: finance-owner@example.invalid
+  coOwners: [finance-reviewer@example.invalid]
+  purpose: >
+    Synthetic daily reconciliation of fixture invoices and settlements for a
+    demonstration finance-review workflow. Schedule is synthetic.
+spec:
+  job:
+    entrypoint: index.mjs
+    startCommand: node index.mjs
+    schedule:
+      cron: "0 9 * * *"
+      timezone: UTC
+    concurrencyPolicy: forbid
+    timeoutSeconds: 900
+    maxRetries: 1
+    historyLimit: 20
+resources:
+  - name: settlements-csv
+    type: file-share
+    classification: finance
+    access: read
+    path: //example.invalid/demo/settlements
+  - name: invoices-db
+    type: postgres
+    classification: finance
+    access: read
+    endpoint: postgres.example.invalid:5432/invoices
+env:
+  - name: SETTLEMENTS_DIR
+    valueFromResource: settlements-csv
+  - name: INVOICES_DB_URL
+    source: minted
+  - name: LOG_LEVEL
+    value: info
+blastRadius:
+  audience: department
+  writesSharedState: true
+riskAttestation:
+  pii: false
+  externallyVisible: false
+  downtimeTolerance: synthetic-demo
+tests:
+  required: true
+  command: node test.mjs

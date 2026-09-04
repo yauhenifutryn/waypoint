@@ -1,0 +1,9 @@
+invoice_id,amount,status
+INV-1001,1250.00,paid
+INV-1002,890.50,paid
+INV-1003,119.00,paid
+INV-1004,2520.00,paid
+INV-1005,77.25,open
+INV-1006,430.10,paid
+INV-1007,1988.88,paid
+INV-1008,15.00,void

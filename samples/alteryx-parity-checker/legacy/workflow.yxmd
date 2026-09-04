@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AlteryxDocument yxmdVer="2022.1">
+  <Nodes>
+    <Node ToolID="1">
+      <GuiSettings Plugin="AlteryxGuiToolkit.Input.Input">
+        <Position x="48" y="156" width="252" height="120" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File FileFormat="0">//example.invalid/demo/ledger/input.csv</File>
+          <FormatSpecificOptions>
+            <Type>CSV</Type>
+            <Delimiter>,</Delimiter>
+            <FirstRowHeaders>True</FirstRowHeaders>
+          </FormatSpecificOptions>
+          <OutputOptions>
+            <Header>True</Header>
+            <Delimiters>,</Delimiters>
+            <QuoteStrings>Auto</QuoteStrings>
+          </OutputOptions>
+        </Configuration>
+        <MetaInfo>
+          <Field name="region" type="V_WString" size="1073741823" />
+          <Field name="vendor" type="V_WString" size="1073741823" />
+          <Field name="amount" type="Double" size="8" />
+        </MetaInfo>
+        <Annotation Text="Ledger extract: region,vendor,amount" />
+      </Properties>
+    </Node>
+    <Node ToolID="2">
+      <GuiSettings Plugin="AlteryxBasePluginsKit.Filter.Filter">
+        <Position x="360" y="156" width="138" height="96" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <Mode>Custom</Mode>
+          <Condition>[amount] &gt; 1000</Condition>
+        </Configuration>
+        <MetaInfo>
+          <Field name="region" type="V_WString" size="1073741823" />
+          <Field name="vendor" type="V_WString" size="1073741823" />
+          <Field name="amount" type="Double" size="8" />
+        </MetaInfo>
+        <Annotation Text="High-value ledger rows only" />
+      </Properties>
+    </Node>
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsKit.Formula.Formula">
+        <Position x="558" y="156" width="138" height="96" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <FormulaFields>
+            <FormulaField field="fee" type="Double" size="8" expression="Round([amount]*0.02, 2)" />
+          </FormulaFields>
+        </Configuration>
+        <MetaInfo>
+          <Field name="region" type="V_WString" size="1073741823" />
+          <Field name="vendor" type="V_WString" size="1073741823" />
+          <Field name="amount" type="Double" size="8" />
+          <Field name="fee" type="Double" size="8" />
+        </MetaInfo>
+        <Annotation Text="fee = Round(amount*0.02, 2)" />
+      </Properties>
+    </Node>
+    <Node ToolID="4">
+      <GuiSettings Plugin="AlteryxBasePluginsKit.Summarize.Summarize">
+        <Position x="756" y="156" width="138" height="96" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <SummarizeFields>
+            <SummarizeField Action="GroupBy" Field="region" />
+            <SummarizeField Action="Sum" Field="amount" Rename="total_amount" />
+            <SummarizeField Action="Sum" Field="fee" Rename="total_fee" />
+          </SummarizeFields>
+        </Configuration>
+        <MetaInfo>
+          <Field name="region" type="V_WString" size="1073741823" />
+          <Field name="total_amount" type="Double" size="8" />
+          <Field name="total_fee" type="Double" size="8" />
+        </MetaInfo>
+        <Annotation Text="Totals per region" />
+      </Properties>
+    </Node>
+    <Node ToolID="5">
+      <GuiSettings Plugin="AlteryxGuiToolkit.Output.Output">
+        <Position x="954" y="156" width="252" height="120" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File FileFormat="0">out\parity_result.csv</File>
+          <OutputOptions>
+            <Header>True</Header>
+            <Delimiters>,</Delimiters>
+            <QuoteStrings>Auto</QuoteStrings>
+          </OutputOptions>
+        </Configuration>
+        <Annotation Text="Parity baseline output" />
+      </Properties>
+    </Node>
+  </Nodes>
+  <Connections>
+    <Connection>
+      <Origin ToolID="1" />
+      <Destination ToolID="2" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="2" />
+      <Destination ToolID="3" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="3" />
+      <Destination ToolID="4" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="4" />
+      <Destination ToolID="5" />
+    </Connection>
+  </Connections>
+  <EngineSettings RandomSeed="807118969" />
+</AlteryxDocument>

@@ -1,0 +1,30 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Agent and personal instructions
+.agent/
+.agents/
+AGENTS.md
+
+# Local runtime state and generated outputs
+data/
+artifacts/
+build/
+dist/
+coverage/
+logs/
+*.log
+*.sqlite
+*.sqlite-*
+
+# Dependencies and framework outputs
+node_modules/
+.next/
+.turbo/
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
