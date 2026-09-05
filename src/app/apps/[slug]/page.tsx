@@ -461,7 +461,7 @@ async function Runtime({ d, role, runParam }: { d: AppDetail; role: string; runP
           </div>
 
           {dep.kind === "job" && (
-            <div className="grid gap-4 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <Card title="Schedule" actions={<IconClock size={14} className="text-stone-300" />}>
                 {jm?.schedule ? (
                   <>
@@ -494,7 +494,7 @@ async function Runtime({ d, role, runParam }: { d: AppDetail; role: string; runP
                 )}
               </Card>
 
-              <Card title="Run history" subtitle={`${d.runs.length} recent runs`} bodyClassName="px-0 py-0">
+              <Card title="Run history" subtitle={`${d.runs.length} recent runs`} bodyClassName="overflow-x-auto px-0 py-0">
                 {d.runs.length === 0 ? (
                   <div className="p-4">
                     <EmptyState title="No runs yet" body="Trigger one manually once the schedule is armed." />
