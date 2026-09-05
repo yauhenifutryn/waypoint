@@ -1,6 +1,6 @@
 import { Cron } from "croner";
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, openSync, writeFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { appendFileSync, closeSync, openSync, writeFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
 import { getDb, audit, ARTIFACTS_DIR, LOGS_DIR, DATA_DIR } from "@/lib/db";
@@ -22,6 +22,7 @@ interface JobRuntime {
   activeRunId: string | null;
   activePid: number | null;
   lastSpec: string | null;
+  stop?: () => void;
 }
 interface ServiceRuntime {
   child: ChildProcess | null;
@@ -145,34 +146,40 @@ function hardenNodeStart(cmd: string, artifactDir: string): string {
 
 function startRun(deploymentId: string, trigger: "manual" | "schedule", externalRunId?: string): void {
   const db = getDb();
+  const runId = externalRunId ?? crypto.randomUUID();
+  // SQLite is the authority across console and supervisor processes. An
+  // IMMEDIATE transaction binds the version and claims one active run before
+  // either process can spawn. Unsupported policies deliberately fail closed.
+  const { manifest: m, artifactDir, versionId, appId } = db.transaction(() => {
   // governance gate: only running deployments of approved/live versions execute
   const dep = db
     .prepare(
-      `SELECT d.desired_state, v.status AS version_status FROM deployments d JOIN versions v ON v.id = d.version_id WHERE d.id = ?`,
+      `SELECT d.desired_state, d.kind, v.status AS version_status FROM deployments d JOIN versions v ON v.id = d.version_id WHERE d.id = ?`,
     )
-    .get(deploymentId) as { desired_state: string; version_status: string } | undefined;
+    .get(deploymentId) as { desired_state: string; kind: string; version_status: string } | undefined;
   if (!dep) throw new Error(`Deployment ${deploymentId} not found`);
+  if (dep.kind !== "job") throw new Error("Only jobs support manual or scheduled runs");
   if (dep.desired_state !== "running") throw new Error(`Deployment is ${dep.desired_state}; start it before running`);
   if (!["approved", "live"].includes(dep.version_status)) {
     throw new Error(`Version status "${dep.version_status}" is not runnable; approvals missing`);
   }
 
+  const loaded = loadManifest(deploymentId);
+  if ((loaded.manifest.spec.job?.concurrencyPolicy ?? "forbid") !== "forbid") throw new Error("Unsupported concurrency policy: this local runner supports forbid only");
+  if (db.prepare("SELECT 1 FROM runs WHERE deployment_id=? AND status IN ('queued','running')").get(deploymentId)) throw new Error("A run is already active");
+  db.prepare("INSERT INTO runs (id, deployment_id, version_id, owner_pid, trigger_type, status, started_at) VALUES (?,?,?,?,?,'running',datetime('now'))")
+    .run(runId, deploymentId, loaded.versionId, process.pid, trigger);
+  return loaded;
+  }).immediate();
   const rt = jobRuntimes.get(deploymentId) ?? { cronJob: null, activeRunId: null, activePid: null, lastSpec: null };
   jobRuntimes.set(deploymentId, rt);
-  if (rt.activeRunId) {
-    log(`job ${deploymentId.slice(0, 8)} still active; skipping tick (concurrencyPolicy handling)`);
-    return;
-  }
-
-  const { manifest: m, artifactDir, versionId, appId } = loadManifest(deploymentId);
-  const runId = externalRunId ?? crypto.randomUUID();
-  db.prepare("INSERT INTO runs (id, deployment_id, trigger_type, status, started_at) VALUES (?,?,?,'running',datetime('now'))")
-    .run(runId, deploymentId, trigger);
-
+  let spawnedChild: ChildProcess | undefined;
+  let fd: number | undefined;
+  try {
   const token = mintRunLease(appId, versionId, m);
   const env = resolveEnvForResources(m, token, artifactDir);
   const logFile = path.join(LOGS_DIR, `run-${runId.slice(0, 8)}.log`);
-  const fd = openSync(logFile, "a");
+  fd = openSync(logFile, "a");
   writeFileSync(fd, `=== run ${runId} (${trigger}) at ${new Date().toISOString()}\n=== cmd: ${m.spec.job?.startCommand}\n`);
 
   const timeoutSec = m.spec.job?.timeoutSeconds ?? 600;
@@ -180,23 +187,32 @@ function startRun(deploymentId: string, trigger: "manual" | "schedule", external
   const startCommand = hardenNodeStart(raw, artifactDir);
   const executor = startCommand === raw ? "process" : "node-permission";
   appendFileSync(logFile, `[supervisor] executor=${executor}\n`);
-  const child: ChildProcess = spawn("/bin/bash", ["-lc", startCommand], {
+  const child: ChildProcess = spawn("/bin/bash", ["-c", startCommand], {
     cwd: artifactDir,
-    env: { ...process.env, CI: "1", ...env },
+    // This is still trusted local execution, not a hostile-code sandbox.
+    // Host credentials and NODE_OPTIONS are never implicitly inherited.
+    env: { PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`, NODE_ENV: "production", CI: "1", ...env },
     detached: true,
     stdio: ["ignore", fd, fd],
   });
+  spawnedChild = child;
   rt.activeRunId = runId;
   rt.activePid = child.pid ?? null;
-  db.prepare("UPDATE runs SET log_file=? WHERE id=?").run(logFile, runId);
-  db.prepare("UPDATE deployments SET pid=?, updated_at=datetime('now') WHERE id=?").run(child.pid ?? null, deploymentId);
-  appendFileSync(logFile, `[supervisor] spawned pid ${child.pid}, timeout ${timeoutSec}s\n`);
 
   let settled = false;
+  let leaderClosed = false;
+  let leaderExitCode: number | null = null;
+  let termination: "timeout" | "failed" | null = null;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const groupAlive = (): boolean => {
+    return child.pid ? processGroupAlive(child.pid) : false;
+  };
   const settle = (status: "success" | "failed" | "timeout", exitCode: number | null): void => {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
+    clearInterval(lifecycleWatcher);
+    if (killTimer) clearTimeout(killTimer);
     try {
       appendFileSync(logFile, `[supervisor] finished ${status} exit=${exitCode}\n`);
     } catch { /* log file gone */ }
@@ -204,33 +220,80 @@ function startRun(deploymentId: string, trigger: "manual" | "schedule", external
     rt.activePid = null;
     recordRunFinished({ runId, status, exitCode });
   };
-
-  const timer = setTimeout(() => {
-    settle("timeout", null);
-    if (rt.activePid) {
-      try {
-        process.kill(-rt.activePid, "SIGTERM");
-      } catch {
-        /* already gone */
-      }
+  const finishWhenTerminated = (): void => {
+    // A shell leader can close while its background children remain alive.
+    // Never release the claim until its entire original group is gone.
+    if (leaderClosed && !groupAlive()) {
+      settle(termination ?? (leaderExitCode === 0 ? "success" : "failed"), leaderExitCode);
     }
-  }, timeoutSec * 1000);
+  };
+  const terminate = (reason: "timeout" | "failed"): void => {
+    if (settled || termination) return;
+    termination = reason;
+    const pid = child.pid;
+    if (!pid) return;
+    stopProcessTree(pid);
+    // The leader closing must not cancel escalation for background children.
+    killTimer = setTimeout(() => {
+      try {process.kill(-pid, "SIGKILL");} catch {}
+      finishWhenTerminated();
+    }, 250);
+  };
+  const timer = setTimeout(() => terminate("timeout"), timeoutSec * 1000);
+  rt.stop = () => terminate("failed");
+  // Also observes stops requested by another process, including manual API runs.
+  const lifecycleWatcher = setInterval(() => {
+    try {
+      const state = db.prepare("SELECT desired_state FROM deployments WHERE id=?").get(deploymentId) as {desired_state:string} | undefined;
+      if (state?.desired_state !== "running") terminate("failed");
+    } catch { terminate("failed"); }
+    finishWhenTerminated();
+  }, 50);
 
   child.on("close", (code) => {
-    if (code === null) return; // handled by timeout path
-    clearTimeout(timer);
-    settle(code === 0 ? "success" : "failed", code);
+    leaderClosed = true;
+    leaderExitCode = code;
+    if (groupAlive()) terminate("failed");
+    finishWhenTerminated();
   });
+  child.on("error", () => {
+    leaderClosed = true;
+    terminate("failed");
+    finishWhenTerminated();
+  });
+  // Install termination handlers before any fallible persistence/log operation
+  // after spawn. A setup error must clean up the already-created process group.
+  closeSync(fd);
+  fd = undefined;
+  db.prepare("UPDATE runs SET pid=? WHERE id=?").run(child.pid ?? null, runId);
+  db.prepare("UPDATE runs SET log_file=? WHERE id=?").run(logFile, runId);
+  db.prepare("UPDATE deployments SET pid=?, updated_at=datetime('now') WHERE id=?").run(child.pid ?? null, deploymentId);
+  appendFileSync(logFile, `[supervisor] spawned pid ${child.pid}, timeout ${timeoutSec}s\n`);
+  audit({actorRole: "supervisor", actorLabel: "waypoint", action: "run_started", subjectType: "run", subjectId: runId,
+    summary: `${trigger} run started`, payload: {deploymentId, versionId, trigger}});
+  } catch (error) {
+    if (fd !== undefined) {try {closeSync(fd);} catch {}}
+    if (spawnedChild) rt.stop?.();
+    else {
+      rt.activeRunId = null;
+      rt.activePid = null;
+      recordRunFinished({runId, status: "failed", exitCode: null});
+    }
+    throw error;
+  }
 }
 
 function scheduleJob(deploymentId: string, cronSpec: string | null, timezone: string | null): void {
   const rt = jobRuntimes.get(deploymentId) ?? { cronJob: null, activeRunId: null, activePid: null, lastSpec: null };
   jobRuntimes.set(deploymentId, rt);
+  const spec = `${cronSpec ?? ""}|${timezone ?? "UTC"}`;
+  if (rt.cronJob && rt.lastSpec === spec) return;
   if (rt.cronJob) {
     rt.cronJob.stop();
     rt.cronJob = null;
   }
   if (!cronSpec) return;
+  rt.lastSpec = spec;
   rt.cronJob = new Cron(
     cronSpec,
     { timezone: timezone ?? "UTC", catch: true },
@@ -328,6 +391,11 @@ function processAlive(pid: number): boolean {
   }
 }
 
+function processGroupAlive(pid: number): boolean {
+  try { process.kill(-pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
 function stopProcessTree(pid: number): void {
   try {
     process.kill(-pid, "SIGTERM");
@@ -388,11 +456,11 @@ async function tick(): Promise<void> {
           const rt = jobRuntimes.get(d.id) ?? { cronJob: null, activeRunId: null, activePid: null, lastSpec: null };
           if (d.desired_state === "running") {
             scheduleJob(d.id, d.cron_spec, d.timezone);
-            db.prepare("UPDATE deployments SET actual_state='running', updated_at=datetime('now') WHERE id=? AND actual_state!='running'").run(d.id);
+            db.prepare("UPDATE deployments SET actual_state='running', updated_at=datetime('now') WHERE id=? AND actual_state='stopped'").run(d.id);
             void rt;
           } else if (d.desired_state === "stopped") {
             if (rt.cronJob) rt.cronJob.stop();
-            jobRuntimes.set(d.id, { ...rt, cronJob: null });
+            jobRuntimes.set(d.id, { ...rt, cronJob: null, lastSpec: null });
             db.prepare("UPDATE deployments SET actual_state='stopped', updated_at=datetime('now') WHERE id=? AND actual_state!='stopped'").run(d.id);
           }
         } else if (d.kind === "service") {
@@ -435,30 +503,36 @@ function bootReconcile(): void {
   }
   // orphaned open runs from a previous supervisor life: mark failed so stats
   // and concurrency guards recover deterministically
-  const orphans = db.prepare("SELECT id, deployment_id FROM runs WHERE status IN ('queued','running')").all() as Array<{ id: string; deployment_id: string }>;
+  const orphans = db.prepare("SELECT id, deployment_id, owner_pid, pid FROM runs WHERE status IN ('queued','running')").all() as Array<{ id: string; deployment_id: string; owner_pid: number | null; pid: number | null }>;
+  let recovered = 0;
   for (const o of orphans) {
-    db.prepare("UPDATE runs SET status='failed', finished_at=datetime('now') WHERE id=?").run(o.id);
-    const d = db.prepare("SELECT desired_state FROM deployments WHERE id=?").get(o.deployment_id) as { desired_state?: string } | undefined;
-    if (d?.desired_state === "running") {
-      const rt = jobRuntimes.get(o.deployment_id) ?? { cronJob: null, activeRunId: o.id, activePid: null, lastSpec: null };
-      // keep the guard slot occupied only until next tick re-evaluates reality
-      jobRuntimes.set(o.deployment_id, rt);
-    }
+    // Another live console may own this run. A surviving child with a dead
+    // owner stays fail-closed: PID identity is not enough to safely kill it.
+    if ((o.owner_pid && processAlive(o.owner_pid)) || (o.pid && (processAlive(o.pid) || processGroupAlive(o.pid)))) continue;
+    const legacyPid = (db.prepare("SELECT pid FROM deployments WHERE id=?").get(o.deployment_id) as {pid:number|null} | undefined)?.pid;
+    if (!o.owner_pid && legacyPid && processAlive(legacyPid)) continue;
+    recordRunFinished({runId:o.id,status:"failed",exitCode:null});
+    recovered++;
   }
-  log(`boot reconcile complete (${orphans.length} orphaned runs closed)`);
+  log(`boot reconcile complete (${recovered} dead orphaned runs closed; live owners/children preserved)`);
 }
 
 export function main(): void {
   log("starting; data dir:", DATA_DIR, "artifacts:", ARTIFACTS_DIR);
   getDb();
   bootReconcile();
-  setInterval(tick, 2000);
+  const tickTimer = setInterval(tick, 2000);
   tick();
 
   const shutdown = (): void => {
     log("shutting down; stopping managed children");
+    clearInterval(tickTimer);
+    for (const rt of jobRuntimes.values()) {
+      rt.cronJob?.stop();
+      rt.stop?.();
+    }
     const db = getDb();
-    const rows = db.prepare("SELECT id, pid FROM deployments WHERE pid IS NOT NULL").all() as Array<{ id: string; pid: number | null }>;
+    const rows = db.prepare("SELECT id, pid FROM deployments WHERE pid IS NOT NULL AND kind!='job'").all() as Array<{ id: string; pid: number | null }>;
     for (const r of rows) {
       if (r.pid && processAlive(r.pid)) {
         stopProcessTree(r.pid);
@@ -466,7 +540,14 @@ export function main(): void {
         log(`stopped deployment ${r.id.slice(0, 8)} (pid ${r.pid})`);
       }
     }
-    process.exit(0);
+    // Let this process's job close handlers record termination. Other live
+    // processes own their own jobs and must survive this supervisor shutdown.
+    const exitWhenClosed = setInterval(() => {
+      if (![...jobRuntimes.values()].some((rt) => rt.activeRunId)) {
+        clearInterval(exitWhenClosed);
+        process.exit(0);
+      }
+    }, 50);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

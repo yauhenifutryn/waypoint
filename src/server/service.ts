@@ -6,7 +6,7 @@ import { getDb, audit, ARTIFACTS_DIR } from "@/lib/db";
 import { validateSource } from "@/lib/engine/pipeline";
 import { canAutoApprove, canTransition, evaluateApprovals, type VersionState } from "@/lib/engine/promotion";
 import { mintLease, scopesFromManifest } from "@/lib/engine/identity";
-import type { Role, SmallSoftwareManifest, Tier } from "@/lib/engine/types";
+import type { Finding, Role, SmallSoftwareManifest, Tier } from "@/lib/engine/types";
 
 function setState(versionId: string, next: VersionState): void {
   const db = getDb();
@@ -58,8 +58,8 @@ export async function submitFromSource(params: {
 
   db.prepare(
     `INSERT INTO versions (id, app_id, label, source_dir, manifest_json, manifest_digest, submitted_by,
-      status, risk_score, risk_reasons_json, packet_md, anomalies_json)
-     VALUES (?,?,?,?,?,?,?, 'submitted', ?,?,?,?)`,
+      status, risk_score, risk_tier, risk_reasons_json, packet_md, anomalies_json)
+     VALUES (?,?,?,?,?,?,?, 'submitted', ?,?,?,?,?)`,
   ).run(
     versionId,
     appId,
@@ -69,6 +69,7 @@ export async function submitFromSource(params: {
     outcome.digest,
     params.actorLabel,
     outcome.risk.score,
+    outcome.risk.tier,
     JSON.stringify(outcome.risk.reasons),
     outcome.packetMd ?? null,
     JSON.stringify(outcome.anomalies ?? []),
@@ -182,13 +183,19 @@ function digestManifestJson(manifestJson: string): string {
 export function requestDeploy(params: { versionId: string; role: Role; actorLabel: string }): { deploymentId: string } {
   const db = getDb();
   const v = db.prepare("SELECT * FROM versions WHERE id = ?").get(params.versionId) as
-    | { id: string; app_id: string; status: VersionState; source_dir: string; manifest_json: string }
+    | { id: string; app_id: string; status: VersionState; source_dir: string; manifest_json: string; risk_tier: Tier | null }
     | undefined;
   if (!v) throw new Error("Version not found");
   if (!["approved", "live"].includes(v.status)) throw new Error(`Cannot deploy from state "${v.status}"`);
   if (!["platform_admin", "platform_reviewer"].includes(params.role)) {
-    // deployment is a platform act; owners attest at submission and review time
-    throw new Error("Only platform roles may deploy");
+    const checks = db.prepare("SELECT key,status FROM checks WHERE version_id=?").all(v.id) as Finding[];
+    const auto = db.prepare("SELECT 1 FROM reviews WHERE version_id=? AND auto=1 AND actor_label='policy-engine' AND decision='approved'").get(v.id);
+    const rejected = db.prepare("SELECT 1 FROM reviews WHERE version_id=? AND decision='rejected'").get(v.id);
+    // Owner is a demo role, not authenticated identity. Only proven standard
+    // changes qualify; declaring status=approved alone cannot unlock this path.
+    if (params.role !== "owner" || v.risk_tier !== 1 || !auto || rejected || !checks.length || !canAutoApprove(v.risk_tier, false, checks)) {
+      throw new Error("Owner deployment requires T1 automatic approval and passing checks; otherwise a platform role must deploy");
+    }
   }
 
   const m = JSON.parse(v.manifest_json) as SmallSoftwareManifest;
@@ -203,8 +210,8 @@ export function requestDeploy(params: { versionId: string; role: Role; actorLabe
       db.prepare("UPDATE versions SET status='superseded', updated_at=datetime('now') WHERE id=? AND status='live'").run(existing.version_id);
     }
     db.prepare(
-      `UPDATE deployments SET version_id=?, desired_state='running', artifact_dir=?, cron_spec=?, timezone=?, kind=?, failure_count=0, updated_at=datetime('now') WHERE id=?`,
-    ).run(v.id, v.source_dir, m.spec.job?.schedule?.cron ?? null, m.spec.job?.schedule?.timezone ?? null, m.kind, existing.id);
+      `UPDATE deployments SET failure_count=CASE WHEN version_id=? THEN failure_count ELSE 0 END, version_id=?, desired_state='running', artifact_dir=?, cron_spec=?, timezone=?, kind=?, updated_at=datetime('now') WHERE id=?`,
+    ).run(v.id, v.id, v.source_dir, m.spec.job?.schedule?.cron ?? null, m.spec.job?.schedule?.timezone ?? null, m.kind, existing.id);
     deploymentId = existing.id;
   } else {
     deploymentId = randomUUID();
@@ -288,20 +295,29 @@ export function recordRunFinished(params: {
   exitCode: number | null;
 }): void {
   const db = getDb();
-  db.prepare("UPDATE runs SET status=?, exit_code=?, finished_at=datetime('now') WHERE id=?")
-    .run(params.status, params.exitCode, params.runId);
-
-  const run = db.prepare("SELECT d.* FROM runs r JOIN deployments d ON d.id = r.deployment_id WHERE r.id=?").get(params.runId) as
-    | { id: string; app_id: string; version_id: string; desired_state: string }
+  db.transaction(() => {
+  const run = db.prepare("SELECT d.*, r.version_id AS run_version_id FROM runs r JOIN deployments d ON d.id = r.deployment_id WHERE r.id=?").get(params.runId) as
+    | { id: string; app_id: string; version_id: string; run_version_id: string | null; desired_state: string }
     | undefined;
   if (!run) return;
+  // Stop and completion serialize on SQLite, so even a fast successful exit
+  // cannot override an already-committed cancellation before the watcher polls.
+  const status = params.status === "success" && run.desired_state !== "running" ? "failed" : params.status;
+  const changed = db.prepare("UPDATE runs SET status=?, exit_code=?, finished_at=datetime('now') WHERE id=? AND status IN ('queued','running')")
+    .run(status, params.exitCode, params.runId);
+  if (!changed.changes) return;
+  audit({actorRole: "supervisor", actorLabel: "waypoint", action: "run_finished", subjectType: "run", subjectId: params.runId,
+    summary: `Run ${status}; exit ${params.exitCode}`, payload: {versionId: run.run_version_id, deploymentId: run.id, status}});
+  // A late result must never promote or change the health of a replacement.
+  if (!run.run_version_id || run.run_version_id !== run.version_id) return;
+  db.prepare("UPDATE deployments SET pid=NULL, health_json=? WHERE id=?").run(JSON.stringify({healthy: status === "success", status, runId: params.runId, versionId: run.run_version_id}), run.id);
 
-  if (params.status === "success") {
-    db.prepare("UPDATE deployments SET failure_count=0, actual_state='running', updated_at=datetime('now') WHERE id=?").run(run.id);
+  if (status === "success") {
+    db.prepare("UPDATE deployments SET failure_count=0, actual_state=?, updated_at=datetime('now') WHERE id=?").run(run.desired_state === "running" ? "running" : "stopped", run.id);
     db.prepare("UPDATE versions SET status='live', updated_at=datetime('now') WHERE id=? AND status IN ('deploying','approved')").run(run.version_id);
   } else {
     const failures = ((db.prepare("SELECT failure_count FROM deployments WHERE id=?").get(run.id) as { failure_count: number }).failure_count ?? 0) + 1;
-    db.prepare("UPDATE deployments SET failure_count=?, updated_at=datetime('now') WHERE id=?").run(failures, run.id);
+    db.prepare("UPDATE deployments SET failure_count=?, actual_state=?, updated_at=datetime('now') WHERE id=?").run(failures, run.desired_state === "running" ? "failed" : "stopped", run.id);
     if (failures >= 3 && run.desired_state === "running") {
       // standard-change revocation: repeated failure pulls pre-authorization
       db.prepare("UPDATE deployments SET desired_state='stopped', updated_at=datetime('now') WHERE id=?").run(run.id);
@@ -317,4 +333,5 @@ export function recordRunFinished(params: {
       });
     }
   }
+  }).immediate();
 }

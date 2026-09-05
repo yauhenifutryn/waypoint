@@ -28,6 +28,7 @@ export interface VersionRow {
   submitted_by: string;
   status: string;
   risk_score: number | null;
+  risk_tier: 1 | 2 | 3 | null;
   risk_reasons_json: string | null;
   packet_md: string | null;
   anomalies_json: string | null;

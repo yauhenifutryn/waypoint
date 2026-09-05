@@ -71,9 +71,9 @@ export default function PolicyPage() {
             </dl>
           </Card>
 
-          <Card title="AI assist boundary">
+          <Card title="Optional semantic review boundary">
             <p className="text-[12.5px] leading-relaxed text-stone-600">
-              Advisory outputs attach to review packets only. The approval state machine has no input port for them:
+              No AI model is connected in this MVP. Fixed advisory checks attach to review packets only; a future model may use the same non-gating slot. The approval state machine has no input port for either:
               <span className="mt-1.5 flex items-center gap-1.5 font-medium text-stone-800">
                 <IconLock size={13} /> advisoryOnly: true, structurally enforced
               </span>

@@ -111,8 +111,8 @@ export async function deployVersion(formData: FormData): Promise<void> {
   const versionId = String(formData.get("versionId") ?? "");
   await guarded(
     formData,
-    ["platform_reviewer", "platform_admin"],
-    "only platform reviewer or admin may deploy",
+    ["owner", "platform_reviewer", "platform_admin"],
+    "only owners with automatic approval or platform roles may deploy",
     ({ role, label }) => {
       requestDeploy({ versionId, role, actorLabel: label });
     },
@@ -123,8 +123,8 @@ export async function stopDeploymentAction(formData: FormData): Promise<void> {
   const appId = String(formData.get("appId") ?? "");
   await guarded(
     formData,
-    ["platform_reviewer", "platform_admin"],
-    "only platform reviewer or admin may stop deployments",
+    ["owner", "platform_reviewer", "platform_admin"],
+    "only owners or platform roles may stop deployments",
     ({ role, label }) => stopDeployment({ appId, role, actorLabel: label }),
   );
 }
@@ -145,8 +145,8 @@ export async function runJobNow(formData: FormData): Promise<void> {
   const deploymentId = String(formData.get("deploymentId") ?? "");
   await guarded(
     formData,
-    ["platform_reviewer", "platform_admin"],
-    "auditors and owners cannot trigger runs",
+    ["owner", "platform_reviewer", "platform_admin"],
+    "only owners or platform roles may trigger runs",
     () => {
       triggerManualRun(deploymentId);
     },

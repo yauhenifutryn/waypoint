@@ -42,6 +42,7 @@ import {
   TierBadge,
 } from "@/components/ui";
 import { Markdown } from "@/components/markdown";
+import {canAutoApprove} from "@/lib/engine/promotion";
 import { approveVersion, currentRole, deployVersion, rejectVersion, rollbackApp, runJobNow, stopDeploymentAction } from "@/server/actions";
 import {
   countRollbackCandidates,
@@ -226,12 +227,12 @@ function Overview({ d }: { d: AppDetail }) {
       )}
 
       <Card
-        title="Advisory AI notes"
-        subtitle="heuristic-v0"
+        title="Automated advisory checks"
+        subtitle="fixed rules · no model connected"
         className="lg:col-span-2"
         actions={
           <span className="inline-flex items-center gap-1 rounded-md bg-stone-50 px-2 py-0.5 text-[10.5px] font-medium text-stone-500 ring-1 ring-inset ring-stone-200" title="Structurally excluded from the approval state machine">
-            <IconLock size={11} /> advisory-only · cannot gate promotion
+            <IconLock size={11} /> advisory only · cannot gate promotion
           </span>
         }
       >
@@ -396,25 +397,27 @@ async function Runtime({ d, role, runParam }: { d: AppDetail; role: string; runP
   const jm = m?.spec.job;
   const sm = m?.spec.service;
   const canOperate = ["platform_reviewer", "platform_admin"].includes(role);
+  const canDeploy = canOperate || (role === "owner" && d.currentVersion?.risk_tier === 1 && d.checks.length > 0 && canAutoApprove(d.currentVersion.risk_tier, false, d.checks) && d.reviews.some(r=>r.auto===1 && r.actor_label==='policy-engine' && r.decision==='approved') && !d.reviews.some(r=>r.decision==='rejected'));
   const canRunJob = ["platform_reviewer", "platform_admin", "owner"].includes(role);
   const selected = runParam ? d.runs.find((r) => r.id === runParam) : undefined;
   const logData = selected && selected.log_file ? await getRunLog(selected.id) : null;
 
   return (
     <div className="space-y-4">
-      {!dep ? (
+      {!dep ? (<>
         <EmptyState
           title="Never deployed"
           body={
             d.currentVersion?.status === "approved"
-              ? canOperate
+              ? canDeploy
                 ? "This version is approved and ready to deploy."
                 : "This version is approved; a platform reviewer or admin must deploy it."
               : "The current version has not reached an approvable state."
           }
           icon={<IconZap size={20} />}
         />
-      ) : (
+        {canDeploy && d.currentVersion?.status === 'approved' && <ActionForm action={deployVersion} fields={{versionId:d.currentVersion.id,back:`/apps/${d.app.slug}?tab=runtime`}} label="Deploy locally" className={BTN_PRIMARY} icon={<IconZap size={13}/>}/>}
+      </>) : (
         <>
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 bg-white px-4 py-2.5">
             <span className={MICRO_LABEL}>Desired</span>
@@ -428,13 +431,13 @@ async function Runtime({ d, role, runParam }: { d: AppDetail; role: string; runP
               </Badge>
             )}
             <span className="ml-auto flex flex-wrap items-center gap-2">
-              {d.currentVersion && ["approved"].includes(d.currentVersion.status) && canOperate && dep.version_id !== d.currentVersion.id && (
+              {d.currentVersion && ["approved"].includes(d.currentVersion.status) && canDeploy && dep.version_id !== d.currentVersion.id && (
                 <ActionForm action={deployVersion} fields={{ versionId: d.currentVersion.id, back: `/apps/${d.app.slug}?tab=runtime` }} label="Deploy" className={BTN_PRIMARY} icon={<IconZap size={13} />} />
               )}
-              {canOperate && dep.desired_state === "running" && dep.kind !== "job" && (
+              {canRunJob && dep.desired_state === "running" && (
                 <ActionForm action={stopDeploymentAction} fields={{ appId: d.app.id, back: `/apps/${d.app.slug}?tab=runtime` }} label="Stop" className={BTN_DANGER} icon={<IconSquare size={12} />} />
               )}
-              {canOperate && dep.desired_state === "stopped" && d.currentVersion && ["live", "approved"].includes(d.currentVersion.status) && dep.version_id === d.currentVersion.id && (
+              {canDeploy && dep.desired_state === "stopped" && d.currentVersion && ["live", "approved"].includes(d.currentVersion.status) && dep.version_id === d.currentVersion.id && (
                 <ActionForm action={deployVersion} fields={{ versionId: d.currentVersion.id, back: `/apps/${d.app.slug}?tab=runtime` }} label="Start" className={BTN_PRIMARY} icon={<IconPlay size={13} />} />
               )}
               {countRollbackCandidates(d.app.id, d.app.current_version_id) > 0 &&
@@ -448,7 +451,7 @@ async function Runtime({ d, role, runParam }: { d: AppDetail; role: string; runP
                     icon={<IconRotateCcw size={13} />}
                   />
                 )}
-              {!canOperate && (dep.desired_state === "running" || d.currentVersion?.status === "approved") && (
+              {!canOperate && !canRunJob && (dep.desired_state === "running" || d.currentVersion?.status === "approved") && (
                 <span className="text-[11.5px] text-stone-400" title="Only platform reviewer or admin may operate runtimes">
                   <IconLock size={11} className="mr-1 inline" />
                   read-only role
@@ -465,7 +468,7 @@ async function Runtime({ d, role, runParam }: { d: AppDetail; role: string; runP
                     <p className="font-mono text-[15px] font-semibold tracking-tight text-stone-900">{jm.schedule.cron}</p>
                     <p className="mt-0.5 text-[12px] text-stone-500">{jm.schedule.timezone}</p>
                     <dl className="mt-3 space-y-1.5 border-t border-stone-100 pt-2.5 text-[12.5px]">
-                      <div className="flex justify-between"><dt className="text-stone-400">Concurrency</dt><dd className="font-medium text-stone-700">{jm.concurrencyPolicy ?? "allow"}</dd></div>
+                      <div className="flex justify-between"><dt className="text-stone-400">Concurrency</dt><dd className="font-medium text-stone-700">{jm.concurrencyPolicy ?? "forbid"}</dd></div>
                       <div className="flex justify-between"><dt className="text-stone-400">Timeout</dt><dd className="font-medium tabular-nums text-stone-700">{jm.timeoutSeconds ?? 600}s</dd></div>
                       <div className="flex justify-between"><dt className="text-stone-400">Max retries</dt><dd className="font-medium tabular-nums text-stone-700">{jm.maxRetries ?? 0}</dd></div>
                     </dl>

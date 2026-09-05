@@ -22,6 +22,7 @@ export function getDb(): Database.Database {
 }
 
 function migrate(d: Database.Database): void {
+  d.transaction(() => {
   d.exec(`
 CREATE TABLE IF NOT EXISTS apps (
   id TEXT PRIMARY KEY,
@@ -136,6 +137,15 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 `);
+  // Historical runs cannot be truthfully rebound to a deployment's current
+  // version. Leave their attribution null; all new claims bind it atomically.
+  const columns = new Set((d.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>).map((c) => c.name));
+  for (const [name, type] of [["version_id", "TEXT REFERENCES versions(id)"], ["owner_pid", "INTEGER"], ["pid", "INTEGER"]]) {
+    if (!columns.has(name)) d.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`);
+  }
+  const versionColumns = new Set((d.prepare("PRAGMA table_info(versions)").all() as Array<{name:string}>).map((c)=>c.name));
+  if (!versionColumns.has("risk_tier")) d.exec("ALTER TABLE versions ADD COLUMN risk_tier INTEGER CHECK (risk_tier IN (1,2,3))");
+  }).immediate();
 }
 
 export function audit(entry: {

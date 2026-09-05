@@ -1,0 +1,25 @@
+apiVersion: smallsoftware/v0.1
+kind: job
+metadata:
+  name: team-report-job
+  owner: demo-owner@example.test
+  purpose: Summarize bundled fictional team activity into a local daily report for its owner.
+spec:
+  job:
+    entrypoint: index.mjs
+    startCommand: node index.mjs
+    schedule:
+      cron: "0 9 * * *"
+      timezone: Europe/Warsaw
+    concurrencyPolicy: forbid
+    timeoutSeconds: 10
+    maxRetries: 0
+blastRadius:
+  audience: team
+  writesSharedState: false
+riskAttestation:
+  pii: false
+  externallyVisible: false
+tests:
+  required: true
+  command: node test.mjs
