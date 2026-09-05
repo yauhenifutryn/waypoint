@@ -18,6 +18,10 @@ The verifier creates a fresh temporary `WAYPOINT_DATA_DIR` before importing data
 
 ## Demonstrated behavior
 
+Automatic approval now uses the explicit `local-node-file-job/v1` contract. It accepts directly runnable JavaScript jobs with included local imports and supported Node standard-library modules, local file I/O, an explicit timeout of 1–60 seconds, `concurrencyPolicy: forbid`, zero retries, no external resource/environment requests, and recorded passing tests. Other shapes are out of scope or need evidence; they are not automatically labelled unsafe. Existing security findings still apply. The broader static/service prototypes are not automatic contracts in this pilot.
+
+The public Site only establishes a preliminary static candidate. It does not run tests or grant the local pipeline's approval. Local scanning precedes trusted test execution; source mutation by those tests and subsequent artifact mutation remain limitations, not production integrity guarantees.
+
 1. Submit `samples/team-report-job`. The real pipeline parses the manifest, scans the source, evaluates its declared resources and risk, reports the absence of third-party dependencies, and executes four reporting assertions.
 2. The daily reporting shape scores T1 and receives a recorded automatic policy approval. An owner may deploy only with T1, policy-engine automatic approval evidence, passing checks, and no rejection. A role selector remains a demo role model; this is not authenticated ownership.
 3. Request deployment and manually run the artifact snapshot. The output is `report.txt`, containing three teams and 22 completed tasks. The same text is captured in the run log.

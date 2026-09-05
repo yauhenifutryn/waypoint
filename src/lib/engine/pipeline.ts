@@ -9,6 +9,7 @@ import { dependencyAudit } from "./scanners/deps";
 import { runCommand, collectSourceFiles } from "./exec";
 import { assessRisk } from "./risk";
 import { buildReviewPacket } from "./packet";
+import { evaluateJobContract, type JobContractAssessment } from "./job-contract";
 import type { Finding, ObservedProfile, RiskAssessment, SmallSoftwareManifest } from "./types";
 
 export interface ValidationOutcome {
@@ -20,6 +21,7 @@ export interface ValidationOutcome {
   findings: Finding[];
   risk?: RiskAssessment;
   autoApproveEligible?: boolean;
+  jobContract?: JobContractAssessment;
   packetMd?: string;
   anomalies?: Array<{ note: string; basis: string; severity: "advisory" }>;
 }
@@ -104,9 +106,11 @@ export async function validateSource(sourceDir: string): Promise<ValidationOutco
   }
 
   // risk assessment + tiering + auto-approval eligibility
+  const jobContract = evaluateJobContract({ manifest, sourceFiles, observed, findings });
+  findings.push(jobContract.finding);
   const risk = assessRisk(manifest, observed, findings);
   const { canAutoApprove } = await import("./risk");
-  const autoApproveEligible = canAutoApprove(risk.tier, risk.hardBlocked, findings);
+  const autoApproveEligible = jobContract.eligible && canAutoApprove(risk.tier, risk.hardBlocked, findings);
 
   const packet = buildReviewPacket({ manifest, observed, findings });
 
@@ -118,6 +122,7 @@ export async function validateSource(sourceDir: string): Promise<ValidationOutco
     findings,
     risk,
     autoApproveEligible,
+    jobContract,
     packetMd: packet.explanationMd,
     anomalies: packet.anomalies,
   };

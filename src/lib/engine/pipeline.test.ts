@@ -5,12 +5,23 @@ import { join } from "node:path";
 const SAMPLES = join(process.cwd(), "samples");
 
 describe("validateSource against the sample fleet", () => {
-  it("weekly-ops-report: Tier 1, auto-approve eligible, no blocking findings", async () => {
+  it("weekly-ops-report: Tier 1 static site requires review outside the local job contract", async () => {
     const r = await validateSource(join(SAMPLES, "weekly-ops-report"));
     expect(r.ok).toBe(true);
     expect(r.risk?.tier).toBe(1);
-    expect(r.autoApproveEligible).toBe(true);
+    expect(r.autoApproveEligible).toBe(false);
+    expect(r.findings.find((f) => f.key === "job-contract")).toMatchObject({ status: "warn" });
+    expect(r.findings.find((f) => f.key === "job-contract")?.details).toContain("Out of scope");
     expect(r.risk?.hardBlocked).toBe(false);
+  }, 60_000);
+
+  it("team-report-job: recorded passing tests and local-file contract permit automatic approval", async () => {
+    const r = await validateSource(join(SAMPLES, "team-report-job"));
+    expect(r.ok).toBe(true);
+    expect(r.risk?.hardBlocked).toBe(false);
+    expect(r.autoApproveEligible).toBe(true);
+    expect(r.findings.find((f) => f.key === "tests")?.status).toBe("pass");
+    expect(r.findings.find((f) => f.key === "job-contract")?.status).toBe("pass");
   }, 60_000);
 
   it("invoice-reconciler: Tier 2, not blocked, tests pass", async () => {
